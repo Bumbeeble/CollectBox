@@ -1,0 +1,226 @@
+/*
+* uart0.c
+
+
+*/
+
+#include "uart.h"
+#include "sys_tim.h"
+#include "led.h"
+#include  "halfduplex.h"
+/*
+* UART数据接收：
+
+直接整个存起来，后面处理函数处理
+	收到头码后直接全部存起来，
+	长度超过数据长度位置后读取长度位置并对比整体数据长度
+*/
+
+code uint8_t UART_RX_Head[] = {0x0a, 0x80, 0x0a, 0x80};
+xdata tUART_RecvStruct RecvBuf_UART0;
+//xdata tUART_RecvStruct RecvBuf_UART1;
+
+/*
+*/
+//uart0 interrupt handler
+void uart0_interrupt(void ) interrupt 4
+{
+	uint16_t buf_length = 0;
+	
+	if(TI)
+	{
+		TI = 0;
+		if(Struct_TxBuf_UART0.tx_status)		
+		{
+			Struct_TxBuf_UART0.tx_pos++;
+			if(Struct_TxBuf_UART0.tx_pos >= Struct_TxBuf_UART0.tx_len)
+			{
+				Struct_TxBuf_UART0.tx_status = 0;		//Transmit complete
+				set_UART0_RXMode();
+			}
+			else
+			{
+				SBUF = Struct_TxBuf_UART0.tx_buf[Struct_TxBuf_UART0.tx_pos];
+			}
+		}
+	}
+	
+	
+	if(RI)
+	{
+		RI = 0;
+		//RX handler，that can run in main loop
+		if(RecvBuf_UART0.rx_over == 0)
+		{
+			if(RecvBuf_UART0.rx_cnt < RX_Head_LEN)
+			{
+				//Head
+				RecvBuf_UART0.rx_data[RecvBuf_UART0.rx_cnt] = SBUF;
+				if(RecvBuf_UART0.rx_data[RecvBuf_UART0.rx_cnt] != UART_RX_Head[RecvBuf_UART0.rx_cnt])
+				{
+					RecvBuf_UART0.err = 0xA0;
+					//RecvBuf_UART0.rx_cnt = 0;		//not match ,restart
+				}
+				RecvBuf_UART0.rx_cnt++;
+				
+			}
+			else
+			{
+				//body
+				RecvBuf_UART0.rx_data[RecvBuf_UART0.rx_cnt] = SBUF;
+				if(RecvBuf_UART0.rx_cnt > RX_LEN_POS+1)
+				{
+					//get data length ,check last byte
+					buf_length = RecvBuf_UART0.rx_data[RX_LEN_POS];
+					buf_length <<= 8;
+					buf_length += RecvBuf_UART0.rx_data[RX_LEN_POS + 1];
+					if(buf_length > 20)
+						RecvBuf_UART0.err = 0xA1;
+					//RecvBuf_UART0.rx_cnt = 0;
+					if(RecvBuf_UART0.rx_cnt >= (buf_length + RX_Head_LEN + RX_CMD_LEN +2))
+					{
+						//Data all received
+						RecvBuf_UART0.rx_over = 1;
+						//RecvBuf_UART0.rx_cnt = 0;
+					}
+				}
+				
+				RecvBuf_UART0.rx_cnt ++;
+				
+			}
+		}
+	}
+}
+
+/**/
+
+void uart1_interrupt(void ) interrupt 15
+{
+	if(TI)
+	{
+		TI = 0;
+	}
+	
+	if(RI)
+	{
+		RI = 0;
+		
+	}
+}
+
+
+//
+void UART_Init(uint32_t baudrate)
+{
+//--------------IO-------------------
+	/**/
+	//UART0
+	P06_Input_Mode;		//Tx
+	P07_Input_Mode;		//Rx
+	//UART1
+	P02_Input_Mode;		//Tx
+	P16_Input_Mode;		//Rx
+	
+	//baudrate setup
+    T3CON &= 0xF8;   //T3PS2=0,T3PS1=0,T3PS0=0(Prescale=1)
+#if	C_ClockDiv_SET == 0
+		RH3    = HIBYTE(65536 - (1000000/(baudrate)));
+		RL3    = LOBYTE(65536 - (1000000/(baudrate)));
+#else
+		RH3    = HIBYTE(65536 - (1000000/(2*C_ClockDiv_SET*baudrate))-1);
+		RL3    = LOBYTE(65536 - (1000000/(2*C_ClockDiv_SET*baudrate))-1);
+#endif
+    set_TR3;         //Trigger Timer3
+//----------------UART0------------------
+	SCON = 0x50;     //UART0 Mode1,REN=1,TI=1
+    set_SMOD;        //UART0 Double Rate Enable
+    set_BRCK;        //UART0 baud rate clock source = Timer3
+	//set_TI;					 //For printf function must setting TI = 1
+	IP |= 0x10;
+	IPH |= 0x10;			//set uart0 interrupt to top level
+	
+//----------------UART1------------------
+	SCON_1 = 0x50;   	//UART1 Mode1,REN_1=1,TI_1=1
+	set_SMOD_1;        //UART1 Double Rate Enable
+	//UART1 can only chose TIM3 as baud rate
+	set_TI_1;
+	UART0_Interrupt_ON();
+	set_UART1_TXMode();
+}
+
+
+void set_UART0_TXMode(void )
+{
+	//UART0
+	P06_PushPull_Mode;		//Tx
+	P07_Input_Mode;		//Rx
+	
+	//RX off
+	REN = 0;
+	//UART0_Interrupt_OFF();	
+}
+
+void set_UART0_RXMode(void )
+{
+
+	P06_Input_Mode;		//Tx
+	P07_Input_Mode;		//Rx
+
+	//RX on
+	REN = 1;
+}
+
+void set_UART1_TXMode(void )
+{
+
+	//UART1
+	P16_PushPull_Mode;		//Tx
+	P02_Input_Mode;			//Rx
+	
+	//RX off
+	REN_1 = 0;		
+}
+
+void set_UART1_RXMode(void )
+{
+	//UART1
+	P16_Input_Mode;		//Tx
+	P02_Input_Mode;		//Rx
+	//RX on
+	REN_1 = 1;		
+}
+void Send_Data_To_UART1 (uint8_t c)
+{
+    TI_1 = 0;
+    SBUF_1 = c;
+    while(TI_1==0);
+}
+
+void send_String_UART1(uint8_t str[], uint8_t len)
+{
+	uint8_t i = 0;
+	while(i < len)
+	{
+		Send_Data_To_UART1(str[i]);
+		i++;
+	}
+}
+
+
+
+char putchar (char ch)
+{
+#if	Bumbee_DEBUG 
+	Send_Data_To_UART1(ch);
+#endif
+	return(ch);
+}
+/*char putchar (char ch)
+{
+#if	Bumbee_DEBUG 
+	Send_Data_To_UART0(ch);
+#endif
+	return(ch);
+}
+*/
+
